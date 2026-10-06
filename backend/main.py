@@ -805,6 +805,13 @@ def export_readings_csv(source: Optional[str] = "all", status: Optional[str] = "
         headers={"Content-Disposition": "attachment; filename=bo_motor_telemetry_export.csv"}
     )
 
+@app.get("/api/download/project-zip")
+def download_project_zip():
+    zip_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "bo-motor-ai.zip")
+    if os.path.exists(zip_path):
+        return FileResponse(zip_path, filename="bo-motor-ai.zip", media_type="application/zip")
+    raise HTTPException(status_code=404, detail="Zip archive not found")
+
 @app.get("/api/alerts")
 def get_alerts():
     conn = get_db_connection()
