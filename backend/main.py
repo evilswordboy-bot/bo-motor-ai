@@ -310,9 +310,19 @@ def get_system_status():
     last_updated = last_row["timestamp"] if last_row else datetime.now().isoformat()
     conn.close()
 
+    if is_live:
+        conn_state = "live"
+        conn_label = "● LIVE DATA | ESP32 Connected"
+    elif real_count > 0:
+        conn_state = "real_dataset"
+        conn_label = f"● REAL HARDWARE LOG | {real_count:,} ESP32 Telemetry Records"
+    else:
+        conn_state = "demo"
+        conn_label = "● DEMO MODE | Simulated Sensor Data"
+
     return {
-        "connection_state": "live" if is_live else "demo",
-        "connection_label": "● LIVE DATA | ESP32 Connected" if is_live else "● DEMO MODE | Simulated Sensor Data",
+        "connection_state": conn_state,
+        "connection_label": conn_label,
         "is_esp32_connected": is_live,
         "simulator_active": simulator_running,
         "last_updated": last_updated,
@@ -812,6 +822,13 @@ def download_project_zip():
         return FileResponse(zip_path, filename="bo-motor-ai.zip", media_type="application/zip")
     raise HTTPException(status_code=404, detail="Zip archive not found")
 
+@app.get("/api/download/offline-html-zip")
+def download_offline_html_zip():
+    zip_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "bo-motor-ai-html-offline.zip")
+    if os.path.exists(zip_path):
+        return FileResponse(zip_path, filename="bo-motor-ai-html-offline.zip", media_type="application/zip")
+    raise HTTPException(status_code=404, detail="Zip archive not found")
+
 @app.get("/api/alerts")
 def get_alerts():
     conn = get_db_connection()
@@ -1002,28 +1019,47 @@ async def websocket_live_stream(websocket: WebSocket):
         if websocket in active_connections:
             active_connections.remove(websocket)
 
-# Background realistic continuous live simulator task
+# Background realistic continuous live simulator / playback task
 async def live_simulation_loop():
     import random
     step = 0
+    real_csv_path = os.path.join(os.path.dirname(__file__), "data", "esp32_hardware_telemetry.csv")
+    real_df = None
+    if os.path.exists(real_csv_path):
+        try:
+            raw_df = pd.read_csv(real_csv_path)
+            # Filter valid non-zero rows
+            real_df = raw_df[(raw_df["Temperature_C"] > 0) | (raw_df["Vibration_g"] > 0) | (raw_df["Motor_PWM"] > 0)].reset_index(drop=True)
+        except Exception as e:
+            print(f"Notice loading real CSV: {e}")
+            real_df = None
+
     while True:
-        await asyncio.sleep(2.0)
-        # Only simulate if simulator_running is True and no real ESP32 stream has been ingested in last 10s
+        await asyncio.sleep(1.5)
+        # Only simulate if simulator_running is True and no live external ESP32 stream has been ingested in last 15s
         now = time.time()
         is_real_active = (last_real_data_time is not None and (now - last_real_data_time) < 15.0)
 
         if simulator_running and not is_real_active and active_connections:
             step += 1
-            # Realistic BO motor telemetry step
-            pwm = 80.0 + 4.0 * math.sin(step / 30.0) + random.uniform(-1.0, 1.0)
-            f_rot = (pwm / 100.0) * 3.1
-            t_sec = step * 2.0
-
-            # Normal baseline with occasional slight fluctuation
-            ax = 0.05 + 0.15 * math.sin(2 * math.pi * f_rot * t_sec) + random.gauss(0, 0.02)
-            ay = 0.08 + 0.15 * math.cos(2 * math.pi * f_rot * t_sec) + random.gauss(0, 0.02)
-            az = 0.98 + 0.05 * math.sin(4 * math.pi * f_rot * t_sec) + random.gauss(0, 0.02)
-            temp = 38.5 + 2.0 * math.sin(step / 60.0) + random.uniform(-0.2, 0.2)
+            if real_df is not None and len(real_df) > 0:
+                idx = step % len(real_df)
+                row = real_df.iloc[idx]
+                ax = float(row["Acceleration_X"])
+                ay = float(row["Acceleration_Y"])
+                az = float(row["Acceleration_Z"])
+                temp = float(row["Temperature_C"]) if float(row["Temperature_C"]) > 0 else 30.5
+                pwm = float(row["Motor_PWM"]) / 255.0 * 100.0 if "Motor_PWM" in row else 80.0
+                src = "real"
+            else:
+                pwm = 80.0 + 4.0 * math.sin(step / 30.0) + random.uniform(-1.0, 1.0)
+                f_rot = (pwm / 100.0) * 3.1
+                t_sec = step * 2.0
+                ax = 0.05 + 0.15 * math.sin(2 * math.pi * f_rot * t_sec) + random.gauss(0, 0.02)
+                ay = 0.08 + 0.15 * math.cos(2 * math.pi * f_rot * t_sec) + random.gauss(0, 0.02)
+                az = 0.98 + 0.05 * math.sin(4 * math.pi * f_rot * t_sec) + random.gauss(0, 0.02)
+                temp = 38.5 + 2.0 * math.sin(step / 60.0) + random.uniform(-0.2, 0.2)
+                src = "synthetic"
 
             payload = SensorIngestPayload(
                 motor_id="BO_MOTOR_01",
@@ -1035,7 +1071,7 @@ async def live_simulation_loop():
                 gyro_y=round(random.gauss(0, 0.01), 4),
                 gyro_z=round(random.gauss(0, 0.01), 4),
                 pwm_duty=round(pwm, 1),
-                source="synthetic"
+                source=src
             )
 
             result = process_sensor_reading(payload)

@@ -261,31 +261,74 @@ if "fault_mode" not in st.session_state:
 if "pwm_duty" not in st.session_state:
     st.session_state.pwm_duty = 85.0
 if "history" not in st.session_state:
-    # Seed 60 historical time points
-    now = datetime.now()
+    csv_file = os.path.join(os.path.dirname(__file__), "data", "esp32_hardware_telemetry.csv")
     history_records = []
-    base_t = 34.0
-    for i in range(60, 0, -1):
-        ts = now - timedelta(seconds=i * 2)
-        v_rms = 0.20 + 0.04 * math.sin(i * 0.2) + np.random.normal(0, 0.015)
-        temp = base_t + 0.05 * (60 - i) + np.random.normal(0, 0.15)
-        rpm = round(85.0 * 2.35 * (1.0 - min(0.15, v_rms * 0.08)), 1)
-        history_records.append({
-            "timestamp": ts,
-            "ax": round(math.sin(i * 0.4) * 0.18 + np.random.normal(0, 0.02), 3),
-            "ay": round(math.cos(i * 0.4) * 0.14 + np.random.normal(0, 0.02), 3),
-            "az": round(0.98 + math.sin(i * 0.8) * 0.06 + np.random.normal(0, 0.02), 3),
-            "accel_magnitude": round(1.0 + v_rms * 0.7, 3),
-            "vibration_rms": round(max(0.05, v_rms), 3),
-            "vibration_peak": round(v_rms * 1.45, 3),
-            "temperature_c": round(temp, 2),
-            "temperature_rate": 0.04,
-            "vibration_rate": 0.002,
-            "rpm_estimated": rpm,
-            "health_score": round(max(0, min(100, 100 - (v_rms - 0.20) * 120)), 1),
-            "fault_type": "Normal",
-            "source": "synthetic"
-        })
+    if os.path.exists(csv_file):
+        try:
+            df_real = pd.read_csv(csv_file)
+            df_valid = df_real[(df_real["Temperature_C"] > 0) | (df_real["Vibration_g"] > 0) | (df_real["Motor_PWM"] > 0)].tail(100)
+            now = datetime.now()
+            for idx, (_, row) in enumerate(df_valid.iterrows()):
+                ts = now - timedelta(seconds=(len(df_valid) - idx) * 2)
+                ax = float(row["Acceleration_X"])
+                ay = float(row["Acceleration_Y"])
+                az = float(row["Acceleration_Z"])
+                vib_g = float(row["Vibration_g"])
+                temp = float(row["Temperature_C"]) if float(row["Temperature_C"]) > 0 else 30.5
+                pwm = float(row["Motor_PWM"]) / 255.0 * 100.0 if "Motor_PWM" in row else 80.0
+                rpm = round((pwm / 100.0) * 200.0 * (1.0 - min(0.2, vib_g * 0.08)), 1)
+                st_label = str(row["Status"]).strip().upper()
+                h_score = float(row["Health_Score"]) if "Health_Score" in row else 95.0
+                
+                f_type = "Normal"
+                if st_label == "CRITICAL":
+                    f_type = "Bearing / Gear Wear" if vib_g > 0.5 else "Mechanical Imbalance"
+                elif st_label == "WARNING":
+                    f_type = "Shaft Misalignment" if ax > 0.2 else "Mechanical Imbalance"
+                    
+                history_records.append({
+                    "timestamp": ts,
+                    "ax": ax,
+                    "ay": ay,
+                    "az": az,
+                    "accel_magnitude": round(math.sqrt(ax*ax + ay*ay + az*az), 3),
+                    "vibration_rms": round(max(0.04, vib_g), 3),
+                    "vibration_peak": round(max(0.06, vib_g * 1.45), 3),
+                    "temperature_c": round(temp, 2),
+                    "temperature_rate": 0.04,
+                    "vibration_rate": 0.002,
+                    "rpm_estimated": rpm,
+                    "health_score": h_score,
+                    "fault_type": f_type,
+                    "source": "real"
+                })
+        except Exception as e:
+            history_records = []
+            
+    if not history_records:
+        now = datetime.now()
+        base_t = 34.0
+        for i in range(60, 0, -1):
+            ts = now - timedelta(seconds=i * 2)
+            v_rms = 0.20 + 0.04 * math.sin(i * 0.2) + np.random.normal(0, 0.015)
+            temp = base_t + 0.05 * (60 - i) + np.random.normal(0, 0.15)
+            rpm = round(85.0 * 2.35 * (1.0 - min(0.15, v_rms * 0.08)), 1)
+            history_records.append({
+                "timestamp": ts,
+                "ax": round(math.sin(i * 0.4) * 0.18 + np.random.normal(0, 0.02), 3),
+                "ay": round(math.cos(i * 0.4) * 0.14 + np.random.normal(0, 0.02), 3),
+                "az": round(0.98 + math.sin(i * 0.8) * 0.06 + np.random.normal(0, 0.02), 3),
+                "accel_magnitude": round(1.0 + v_rms * 0.7, 3),
+                "vibration_rms": round(max(0.05, v_rms), 3),
+                "vibration_peak": round(v_rms * 1.45, 3),
+                "temperature_c": round(temp, 2),
+                "temperature_rate": 0.04,
+                "vibration_rate": 0.002,
+                "rpm_estimated": rpm,
+                "health_score": round(max(0, min(100, 100 - (v_rms - 0.20) * 120)), 1),
+                "fault_type": "Normal",
+                "source": "synthetic"
+            })
     st.session_state.history = history_records
 
 # -----------------------------------------------------------------------------

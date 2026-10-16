@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+env/
+
+# Node
+frontend/node_modules/
+node_modules/
+
+# Cloudflare & binaries
+cloudflared.exe
+*.zip
+backend/__pycache__/
+
+# OS generated
+.DS_Store
+Thumbs.db
