@@ -13,6 +13,7 @@ import { AnomalyDetectionView } from './components/AnomalyDetectionView';
 import { FaultClassificationView } from './components/FaultClassificationView';
 import { MaintenancePredictionView } from './components/MaintenancePredictionView';
 import { HistoricalAnalysisView } from './components/HistoricalAnalysisView';
+import { CsvStudioView } from './components/CsvStudioView';
 import { DatasetView } from './components/DatasetView';
 import { ModelPerformanceView } from './components/ModelPerformanceView';
 import { SettingsView } from './components/SettingsView';
@@ -205,6 +206,8 @@ export function App() {
           )}
 
           {currentView === 'historical' && <HistoricalAnalysisView />}
+
+          {currentView === 'csv_studio' && <CsvStudioView />}
 
           {currentView === 'dataset' && (
             <DatasetView onNavigate={setCurrentView} />

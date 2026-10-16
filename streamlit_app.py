@@ -15,6 +15,7 @@ import math
 import time
 import os
 import io
+import sqlite3
 
 # -----------------------------------------------------------------------------
 # PAGE CONFIGURATION & STYLING
@@ -349,6 +350,7 @@ with st.sidebar:
             "🧠 AI Anomaly Detection",
             "🔍 Fault Diagnostics",
             "🎮 Interactive Simulator",
+            "📁 CSV Studio & Data Editor",
             "📋 Dataset & Export",
             "📟 ESP32 Firmware & Wiring"
         ],
@@ -918,6 +920,270 @@ elif page == "🎮 Interactive Simulator":
                 })
             st.success(f"Simulated {sim_duration} seconds of {sim_regime} telemetry successfully!")
             st.rerun()
+
+# =============================================================================
+# VIEW 6.5: CSV STUDIO & DATA EDITOR
+# =============================================================================
+elif page == "📁 CSV Studio & Data Editor":
+    st.markdown("### 📁 CSV Studio & Interactive Telemetry Editor")
+    st.markdown("<span style='color:#94A3B8; font-size:0.85rem;'>Upload custom CSV telemetry datasets, delete/purge records, and edit live sensor rows inline with automatic database synchronization.</span>", unsafe_allow_html=True)
+    
+    tab_edit, tab_upload, tab_delete = st.tabs([
+        "✏️ Interactive Editable Table",
+        "📤 Upload CSV Telemetry",
+        "🗑️ Delete & Clear Records"
+    ])
+    
+    # -------------------------------------------------------------------------
+    # SUBTAB 1: EDITABLE TABLE
+    # -------------------------------------------------------------------------
+    with tab_edit:
+        st.markdown("#### ✏️ Live Telemetry Grid Editor")
+        st.markdown("<span style='color:#94A3B8; font-size:0.8rem;'>Double-click any cell to edit inline. You can modify physical values, adjust health scores, reclassify fault patterns, or add/delete rows using the bottom controls.</span>", unsafe_allow_html=True)
+        
+        if st.session_state.history:
+            edit_df = pd.DataFrame(st.session_state.history)
+            
+            # Format and select columns for display/editing
+            col_order = ["timestamp", "source", "temperature_c", "pwm_duty", "vibration_rms", "vibration_peak", "ax", "ay", "az", "health_score", "fault_type"]
+            present_cols = [c for c in col_order if c in edit_df.columns]
+            other_cols = [c for c in edit_df.columns if c not in present_cols]
+            display_df = edit_df[present_cols + other_cols]
+            
+            edited_df = st.data_editor(
+                display_df,
+                num_rows="dynamic",
+                use_container_width=True,
+                height=450,
+                column_config={
+                    "source": st.column_config.SelectboxColumn("Source", options=["real", "synthetic"], required=True),
+                    "fault_type": st.column_config.SelectboxColumn("Fault Pattern", options=FAULT_CLASSES, required=True),
+                    "temperature_c": st.column_config.NumberColumn("Temp (°C)", format="%.1f", min_value=0.0, max_value=120.0),
+                    "pwm_duty": st.column_config.NumberColumn("PWM (%)", format="%.0f", min_value=0.0, max_value=100.0),
+                    "vibration_rms": st.column_config.NumberColumn("Vib RMS (g)", format="%.3f", min_value=0.0, max_value=5.0),
+                    "health_score": st.column_config.NumberColumn("Health (%)", format="%.0f", min_value=0.0, max_value=100.0),
+                },
+                key="telemetry_data_editor"
+            )
+            
+            col_save, col_dl, col_revert = st.columns([2, 2, 1])
+            with col_save:
+                if st.button("💾 Save Changes to Active Session & SQLite Database", type="primary"):
+                    try:
+                        # Update session state history
+                        records = edited_df.to_dict('records')
+                        st.session_state.history = records
+                        
+                        # Sync to SQLite DB if available
+                        db_path = os.path.join(os.path.dirname(__file__), "backend", "bo_motor.db")
+                        if os.path.exists(db_path):
+                            conn = sqlite3.connect(db_path)
+                            cur = conn.cursor()
+                            for r in records[-50:]:
+                                cur.execute("""
+                                INSERT INTO sensor_readings (timestamp, motor_id, source, pwm_duty, ax, ay, az, gyro_x, gyro_y, gyro_z, temperature_c)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """, (str(r.get("timestamp", datetime.now().isoformat())), "BO_MOTOR_01", r.get("source", "real"), float(r.get("pwm_duty", 80.0)),
+                                      float(r.get("ax", 0.1)), float(r.get("ay", 0.1)), float(r.get("az", 0.98)), 0.0, 0.0, 0.0, float(r.get("temperature_c", 35.0))))
+                                rid = cur.lastrowid
+                                cur.execute("""
+                                INSERT INTO features (reading_id, accel_magnitude, vibration_rms, vibration_peak, vibration_variance, temperature_c, temperature_rate, vibration_rate, rpm_estimated)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """, (rid, float(r.get("accel_magnitude", 1.0)), float(r.get("vibration_rms", 0.25)), float(r.get("vibration_peak", 0.35)),
+                                      0.01, float(r.get("temperature_c", 35.0)), 0.0, 0.0, float(r.get("rpm_estimated", 180.0))))
+                                cur.execute("""
+                                INSERT INTO fault_predictions (reading_id, timestamp, motor_id, fault_type, confidence, sensor_evidence)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                                """, (rid, str(r.get("timestamp", datetime.now().isoformat())), "BO_MOTOR_01", str(r.get("fault_type", "Normal")), 95.0, "{}"))
+                            conn.commit()
+                            conn.close()
+                        st.success("✅ Changes successfully saved to active session and database!")
+                        time.sleep(0.5)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error saving changes: {e}")
+                        
+            with col_dl:
+                csv_edited = edited_df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Download Edited Dataset (CSV)",
+                    data=csv_edited,
+                    file_name="bo_motor_edited_telemetry.csv",
+                    mime="text/csv"
+                )
+            with col_revert:
+                if st.button("🔄 Reload"):
+                    st.rerun()
+        else:
+            st.info("No telemetry records in memory. Ingest readings or upload a CSV below.")
+
+    # -------------------------------------------------------------------------
+    # SUBTAB 2: UPLOAD CSV
+    # -------------------------------------------------------------------------
+    with tab_upload:
+        st.markdown("#### 📤 Upload Custom Telemetry Dataset")
+        st.markdown("<span style='color:#94A3B8; font-size:0.8rem;'>Upload physical hardware CSV logs (e.g., DOC-20261012-WA0014.csv) or previously exported datasets.</span>", unsafe_allow_html=True)
+        
+        uploaded_file = st.file_uploader("Select CSV File", type=["csv"])
+        upload_mode = st.radio("Ingestion Mode", ["Append to current records", "Replace real telemetry records"], index=0)
+        
+        if uploaded_file is not None:
+            try:
+                raw_df = pd.read_csv(uploaded_file)
+                st.write(f"**Preview of `{uploaded_file.name}`** ({len(raw_df):,} rows, {len(raw_df.columns)} columns):")
+                st.dataframe(raw_df.head(5), use_container_width=True)
+                
+                if st.button("🚀 Process & Ingest Uploaded CSV", type="primary"):
+                    with st.spinner("Processing CSV columns, extracting physical features, and evaluating ML models..."):
+                        # Save file to data dirs
+                        file_bytes = uploaded_file.getvalue()
+                        for target_dir in [os.path.join(os.path.dirname(__file__), "data"), os.path.join(os.path.dirname(__file__), "backend", "data")]:
+                            os.makedirs(target_dir, exist_ok=True)
+                            with open(os.path.join(target_dir, uploaded_file.name), "wb") as f:
+                                f.write(file_bytes)
+                                
+                        # Column normalizer
+                        col_l = {str(c).strip().lower(): c for c in raw_df.columns}
+                        
+                        def get_c(row, *cands, default=0.0):
+                            for cand in cands:
+                                if cand.lower() in col_l:
+                                    try:
+                                        val = row[col_l[cand.lower()]]
+                                        if pd.notna(val):
+                                            return float(val)
+                                    except:
+                                        pass
+                            return default
+
+                        def get_s(row, *cands, default=""):
+                            for cand in cands:
+                                if cand.lower() in col_l:
+                                    val = row[col_l[cand.lower()]]
+                                    if pd.notna(val):
+                                        return str(val)
+                            return default
+
+                        new_history = []
+                        now = datetime.now()
+                        for idx, (_, row) in enumerate(raw_df.iterrows()):
+                            temp = get_c(row, "Temperature_C", "temperature_c", "temperature", "temp", default=32.0)
+                            ax = get_c(row, "Acceleration_X", "ax", default=0.1)
+                            ay = get_c(row, "Acceleration_Y", "ay", default=0.12)
+                            az = get_c(row, "Acceleration_Z", "az", default=0.98)
+                            pwm = get_c(row, "Motor_PWM", "Motor_Percent", "pwm_duty", "pwm", default=80.0)
+                            if pwm > 100.0:
+                                pwm = round((pwm / 255.0) * 100.0, 1)
+                            vib_g = get_c(row, "Vibration_g", "vibration_rms", "vibration", default=None)
+                            v_rms = vib_g if vib_g is not None and vib_g > 0 else round(math.sqrt(ax**2 + ay**2 + (az - 1.0)**2), 3)
+                            v_peak = round(v_rms * 1.5, 3)
+                            h_score = get_c(row, "Health_Score", "health_score", default=90.0)
+                            status_str = get_s(row, "Status", "status", default="Normal")
+                            fault_type = "Normal" if "NORM" in status_str.upper() else ("Bearing / Gear Wear" if "CRIT" in status_str.upper() else "Mechanical Imbalance")
+                            rpm = round((pwm / 100.0) * 200.0 * (1.0 - min(0.20, v_rms * 0.08)), 1)
+                            
+                            ts = now - timedelta(seconds=(len(raw_df) - idx))
+                            new_history.append({
+                                "timestamp": ts,
+                                "ax": ax,
+                                "ay": ay,
+                                "az": az,
+                                "accel_magnitude": round(math.sqrt(ax**2 + ay**2 + az**2), 3),
+                                "vibration_rms": v_rms,
+                                "vibration_peak": v_peak,
+                                "temperature_c": temp,
+                                "temperature_rate": 0.02,
+                                "vibration_rate": 0.005,
+                                "rpm_estimated": rpm,
+                                "health_score": h_score,
+                                "fault_type": fault_type,
+                                "source": "real"
+                            })
+                            
+                        if "Replace" in upload_mode:
+                            st.session_state.history = new_history[-150:]
+                        else:
+                            st.session_state.history.extend(new_history[-100:])
+                            if len(st.session_state.history) > 200:
+                                st.session_state.history = st.session_state.history[-200:]
+                                
+                        st.success(f"🎉 Successfully ingested {len(new_history):,} records from `{uploaded_file.name}`!")
+                        time.sleep(1.0)
+                        st.rerun()
+            except Exception as e:
+                st.error(f"Error parsing uploaded file: {e}")
+
+    # -------------------------------------------------------------------------
+    # SUBTAB 3: DELETE & CLEAR CONTROLS
+    # -------------------------------------------------------------------------
+    with tab_delete:
+        st.markdown("#### 🗑️ Telemetry Deletion & Database Clear Controls")
+        st.markdown("<span style='color:#94A3B8; font-size:0.8rem;'>Remove specific telemetry subsets or clear storage caches.</span>", unsafe_allow_html=True)
+        
+        c_del1, c_del2, c_del3 = st.columns(3)
+        with c_del1:
+            if st.button("🗑️ Delete All Real Records", type="secondary"):
+                st.session_state.history = [r for r in st.session_state.history if r.get("source") != "real"]
+                # Also call backend if running
+                try:
+                    import urllib.request
+                    req = urllib.request.Request("http://localhost:8000/api/dataset/clear-type?source=real", method="DELETE")
+                    urllib.request.urlopen(req)
+                except:
+                    pass
+                st.success("Cleared all real telemetry records.")
+                time.sleep(0.5)
+                st.rerun()
+                
+        with c_del2:
+            if st.button("🗑️ Delete All Synthetic Records", type="secondary"):
+                st.session_state.history = [r for r in st.session_state.history if r.get("source") != "synthetic"]
+                try:
+                    import urllib.request
+                    req = urllib.request.Request("http://localhost:8000/api/dataset/clear-type?source=synthetic", method="DELETE")
+                    urllib.request.urlopen(req)
+                except:
+                    pass
+                st.success("Cleared all synthetic demo records.")
+                time.sleep(0.5)
+                st.rerun()
+                
+        with c_del3:
+            if st.button("⚠️ Purge All Telemetry", type="primary"):
+                st.session_state.history = []
+                try:
+                    import urllib.request
+                    req = urllib.request.Request("http://localhost:8000/api/dataset/clear-type?source=all", method="DELETE")
+                    urllib.request.urlopen(req)
+                except:
+                    pass
+                st.warning("All records purged from memory and database.")
+                time.sleep(0.5)
+                st.rerun()
+                
+        st.markdown("--- ")
+        st.markdown("#### 📁 Server CSV Storage Files")
+        data_dir = os.path.join(os.path.dirname(__file__), "backend", "data")
+        if os.path.exists(data_dir):
+            csv_files = [f for f in os.listdir(data_dir) if f.endswith(".csv")]
+            if csv_files:
+                for f_name in csv_files:
+                    f_path = os.path.join(data_dir, f_name)
+                    f_size = round(os.path.getsize(f_path) / 1024, 1)
+                    c_f1, c_f2 = st.columns([4, 1])
+                    with c_f1:
+                        st.markdown(f"📄 **`{f_name}`** ({f_size} KB)")
+                    with c_f2:
+                        if st.button(f"Delete", key=f"del_{f_name}"):
+                            try:
+                                os.remove(f_path)
+                                st.success(f"Deleted `{f_name}`")
+                                time.sleep(0.5)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error: {e}")
+            else:
+                st.info("No CSV files found in server data directory.")
 
 # =============================================================================
 # VIEW 7: DATASET EXPLORER & CSV EXPORT

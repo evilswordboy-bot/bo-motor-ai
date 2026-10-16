@@ -1,4 +1,5 @@
 import asyncio
+import io
 import json
 import math
 import os
@@ -64,6 +65,29 @@ class SettingsPayload(BaseModel):
     vibration_rolling_window_sec: Optional[float] = 2.0
     data_polling_interval_ms: Optional[int] = 2000
     motor_nominal_rpm: Optional[float] = 200.0
+
+class ReadingUpdatePayload(BaseModel):
+    temperature_c: Optional[float] = None
+    pwm_duty: Optional[float] = None
+    ax: Optional[float] = None
+    ay: Optional[float] = None
+    az: Optional[float] = None
+    vibration_rms: Optional[float] = None
+    health_score: Optional[float] = None
+    anomaly_score: Optional[float] = None
+    status: Optional[str] = None
+    fault_type: Optional[str] = None
+
+class ReadingCreatePayload(BaseModel):
+    motor_id: str = "BO_MOTOR_01"
+    temperature_c: float = 35.0
+    pwm_duty: float = 80.0
+    ax: float = 0.1
+    ay: float = 0.15
+    az: float = 0.98
+    vibration_rms: Optional[float] = None
+    source: str = "real"
+    fault_type: Optional[str] = "Normal"
 
 def get_setting(key: str, default: Any) -> Any:
     conn = get_db_connection()
@@ -962,6 +986,328 @@ def clear_synthetic_data():
     conn.commit()
     conn.close()
     return {"status": "success", "message": "Synthetic dataset cleared."}
+
+@app.get("/api/dataset/files")
+def list_dataset_files():
+    data_dir = os.path.join(os.path.dirname(__file__), "data")
+    os.makedirs(data_dir, exist_ok=True)
+    files = []
+    for f in os.listdir(data_dir):
+        if f.endswith(".csv"):
+            fpath = os.path.join(data_dir, f)
+            size_kb = round(os.path.getsize(fpath) / 1024, 1)
+            mtime = datetime.fromtimestamp(os.path.getmtime(fpath)).strftime("%Y-%m-%d %H:%M:%S")
+            row_count = 0
+            try:
+                with open(fpath, "r", encoding="utf-8", errors="replace") as fp:
+                    row_count = sum(1 for _ in fp) - 1
+            except:
+                pass
+            files.append({
+                "filename": f,
+                "size_kb": size_kb,
+                "rows": max(0, row_count),
+                "modified": mtime,
+                "is_active": (f == "esp32_hardware_telemetry.csv")
+            })
+    return {"files": files}
+
+@app.delete("/api/dataset/files/{filename}")
+def delete_dataset_file(filename: str):
+    data_dir = os.path.join(os.path.dirname(__file__), "data")
+    fpath = os.path.join(data_dir, filename)
+    if not os.path.exists(fpath):
+        raise HTTPException(status_code=404, detail="File not found")
+    try:
+        os.remove(fpath)
+        # Also remove from root data/ if present
+        root_data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+        root_path = os.path.join(root_data_dir, filename)
+        if os.path.exists(root_path):
+            os.remove(root_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")
+    return {"status": "success", "message": f"File {filename} deleted successfully"}
+
+@app.delete("/api/dataset/clear-type")
+def clear_dataset_by_type(source: str = Query("all", description="'all', 'real', or 'synthetic'")):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    if source == "all":
+        cursor.execute("DELETE FROM features")
+        cursor.execute("DELETE FROM anomalies")
+        cursor.execute("DELETE FROM fault_predictions")
+        cursor.execute("DELETE FROM health_logs")
+        cursor.execute("DELETE FROM alerts")
+        cursor.execute("DELETE FROM sensor_readings")
+    elif source in ("real", "synthetic"):
+        cursor.execute("DELETE FROM features WHERE reading_id IN (SELECT id FROM sensor_readings WHERE source = ?)", (source,))
+        cursor.execute("DELETE FROM anomalies WHERE reading_id IN (SELECT id FROM sensor_readings WHERE source = ?)", (source,))
+        cursor.execute("DELETE FROM fault_predictions WHERE reading_id IN (SELECT id FROM sensor_readings WHERE source = ?)", (source,))
+        cursor.execute("DELETE FROM health_logs WHERE reading_id IN (SELECT id FROM sensor_readings WHERE source = ?)", (source,))
+        cursor.execute("DELETE FROM sensor_readings WHERE source = ?", (source,))
+    else:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Invalid source type. Use 'all', 'real', or 'synthetic'.")
+        
+    conn.commit()
+    conn.close()
+    return {"status": "success", "cleared_source": source, "message": f"Cleared {source} dataset records successfully."}
+
+@app.post("/api/dataset/upload-csv")
+async def upload_dataset_csv(
+    file: UploadFile = File(...),
+    mode: str = Query("append", description="'append' or 'replace'")
+):
+    import pandas as pd
+    
+    if not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Only .csv files are supported")
+        
+    contents = await file.read()
+    try:
+        text = contents.decode("utf-8", errors="replace")
+        df = pd.read_csv(io.StringIO(text))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to parse CSV: {str(e)}")
+        
+    if df.empty:
+        raise HTTPException(status_code=400, detail="Uploaded CSV file contains no data")
+        
+    # Save a copy to backend/data/
+    data_dir = os.path.join(os.path.dirname(__file__), "data")
+    os.makedirs(data_dir, exist_ok=True)
+    saved_path = os.path.join(data_dir, file.filename)
+    with open(saved_path, "wb") as f:
+        f.write(contents)
+        
+    # Also save to data/ in root
+    root_data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+    os.makedirs(root_data_dir, exist_ok=True)
+    with open(os.path.join(root_data_dir, file.filename), "wb") as f:
+        f.write(contents)
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    if mode == "replace":
+        cursor.execute("DELETE FROM features WHERE reading_id IN (SELECT id FROM sensor_readings WHERE source = 'real')")
+        cursor.execute("DELETE FROM anomalies WHERE reading_id IN (SELECT id FROM sensor_readings WHERE source = 'real')")
+        cursor.execute("DELETE FROM fault_predictions WHERE reading_id IN (SELECT id FROM sensor_readings WHERE source = 'real')")
+        cursor.execute("DELETE FROM health_logs WHERE reading_id IN (SELECT id FROM sensor_readings WHERE source = 'real')")
+        cursor.execute("DELETE FROM sensor_readings WHERE source = 'real'")
+        conn.commit()
+
+    col_map = {str(c).strip().lower(): c for c in df.columns}
+    
+    def get_val(row, *candidates, default=0.0):
+        for cand in candidates:
+            cand_l = cand.lower()
+            if cand_l in col_map:
+                try:
+                    val = row[col_map[cand_l]]
+                    if pd.notna(val):
+                        return float(val)
+                except:
+                    pass
+        return default
+
+    def get_str(row, *candidates, default=""):
+        for cand in candidates:
+            cand_l = cand.lower()
+            if cand_l in col_map:
+                val = row[col_map[cand_l]]
+                if pd.notna(val):
+                    return str(val)
+        return default
+
+    inserted = 0
+    now_base = datetime.now()
+    
+    for i, row in df.iterrows():
+        temp = get_val(row, "Temperature_C", "temperature_c", "temperature", "temp", default=32.0)
+        ax = get_val(row, "Acceleration_X", "ax", "accel_x", default=0.1)
+        ay = get_val(row, "Acceleration_Y", "ay", "accel_y", default=0.12)
+        az = get_val(row, "Acceleration_Z", "az", "accel_z", default=0.98)
+        pwm = get_val(row, "Motor_PWM", "Motor_Percent", "pwm_duty", "pwm", default=80.0)
+        if pwm > 100.0:
+            pwm = round((pwm / 255.0) * 100.0, 1)
+            
+        vib_g = get_val(row, "Vibration_g", "vibration_rms", "vibration", default=None)
+        h_score = get_val(row, "Health_Score", "health_score", "health", default=None)
+        status_raw = get_str(row, "Status", "status", "severity", default="NORMAL")
+        
+        status_map = {"NORMAL": "Normal", "WARNING": "Warning", "CRITICAL": "Critical"}
+        status = status_map.get(status_raw.upper(), "Normal")
+        
+        a_mag = round(math.sqrt(ax**2 + ay**2 + az**2), 4)
+        v_rms = vib_g if vib_g is not None and vib_g > 0 else round(math.sqrt(ax**2 + ay**2 + (az - 1.0)**2), 4)
+        v_peak = round(v_rms * 1.5, 4)
+        v_var = round(v_rms ** 2 * 0.25, 6)
+        rpm_est = round((pwm / 100.0) * 200.0 * (1.0 - min(0.20, v_rms * 0.08)), 1)
+        
+        ts_ms = get_val(row, "Timestamp_ms", default=None)
+        if ts_ms is not None:
+            ts_iso = (now_base - timedelta(milliseconds=(len(df) - i) * 1000)).isoformat()
+        else:
+            ts_str = get_str(row, "timestamp", "time", default=None)
+            ts_iso = ts_str if ts_str else (now_base - timedelta(seconds=(len(df) - i))).isoformat()
+            
+        cursor.execute("""
+        INSERT INTO sensor_readings (timestamp, motor_id, source, pwm_duty, ax, ay, az, gyro_x, gyro_y, gyro_z, temperature_c)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (ts_iso, "BO_MOTOR_01", "real", pwm, ax, ay, az, 0.0, 0.0, 0.0, temp))
+        reading_id = cursor.lastrowid
+        
+        cursor.execute("""
+        INSERT INTO features (reading_id, accel_magnitude, vibration_rms, vibration_peak, vibration_variance, temperature_c, temperature_rate, vibration_rate, rpm_estimated)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (reading_id, a_mag, v_rms, v_peak, v_var, temp, 0.0, 0.0, rpm_est))
+        
+        anom_score = 0.85 if status == "Critical" else (0.58 if status == "Warning" else 0.15)
+        is_anom = 1 if status != "Normal" else 0
+        cursor.execute("""
+        INSERT INTO anomalies (reading_id, timestamp, anomaly_score, is_anomaly, severity)
+        VALUES (?, ?, ?, ?, ?)
+        """, (reading_id, ts_iso, anom_score, is_anom, status))
+        
+        if h_score is None:
+            h_score = 50.0 if status == "Critical" else (75.0 if status == "Warning" else 95.0)
+        cursor.execute("""
+        INSERT INTO health_logs (reading_id, timestamp, health_score, vibration_risk, temperature_risk, trend_risk, anomaly_risk)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (reading_id, ts_iso, h_score, round(v_rms * 40, 1), round(max(0, temp - 35) * 2, 1), 5.0, round(anom_score * 30, 1)))
+        
+        f_type = "Bearing / Gear Wear" if status == "Critical" else ("Mechanical Imbalance" if status == "Warning" else "Normal")
+        cursor.execute("""
+        INSERT INTO fault_predictions (reading_id, timestamp, motor_id, fault_type, confidence, sensor_evidence)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """, (reading_id, ts_iso, "BO_MOTOR_01", f_type, 92.5, json.dumps({"source": "csv_import"})))
+        
+        inserted += 1
+        
+    conn.commit()
+    conn.close()
+    
+    return {
+        "status": "success",
+        "inserted_records": inserted,
+        "filename": file.filename,
+        "mode": mode,
+        "message": f"Successfully imported {inserted} records from {file.filename} (mode: {mode})."
+    }
+
+@app.delete("/api/dataset/readings/{reading_id}")
+def delete_reading_endpoint(reading_id: int):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM sensor_readings WHERE id = ?", (reading_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Reading record not found")
+        
+    cursor.execute("DELETE FROM features WHERE reading_id = ?", (reading_id,))
+    cursor.execute("DELETE FROM anomalies WHERE reading_id = ?", (reading_id,))
+    cursor.execute("DELETE FROM fault_predictions WHERE reading_id = ?", (reading_id,))
+    cursor.execute("DELETE FROM health_logs WHERE reading_id = ?", (reading_id,))
+    cursor.execute("DELETE FROM sensor_readings WHERE id = ?", (reading_id,))
+    conn.commit()
+    conn.close()
+    return {"status": "success", "reading_id": reading_id, "message": f"Reading #{reading_id} deleted"}
+
+@app.put("/api/dataset/readings/{reading_id}")
+def update_reading_endpoint(reading_id: int, payload: ReadingUpdatePayload):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT id FROM sensor_readings WHERE id = ?", (reading_id,))
+    if not cursor.fetchone():
+        conn.close()
+        raise HTTPException(status_code=404, detail="Reading record not found")
+        
+    update_fields = []
+    params = []
+    if payload.temperature_c is not None:
+        update_fields.append("temperature_c = ?")
+        params.append(payload.temperature_c)
+    if payload.pwm_duty is not None:
+        update_fields.append("pwm_duty = ?")
+        params.append(payload.pwm_duty)
+    if payload.ax is not None:
+        update_fields.append("ax = ?")
+        params.append(payload.ax)
+    if payload.ay is not None:
+        update_fields.append("ay = ?")
+        params.append(payload.ay)
+    if payload.az is not None:
+        update_fields.append("az = ?")
+        params.append(payload.az)
+    if update_fields:
+        params.append(reading_id)
+        cursor.execute(f"UPDATE sensor_readings SET {', '.join(update_fields)} WHERE id = ?", params)
+        
+    feat_fields = []
+    feat_params = []
+    if payload.vibration_rms is not None:
+        feat_fields.append("vibration_rms = ?")
+        feat_params.append(payload.vibration_rms)
+    if payload.temperature_c is not None:
+        feat_fields.append("temperature_c = ?")
+        feat_params.append(payload.temperature_c)
+    if feat_fields:
+        feat_params.append(reading_id)
+        cursor.execute(f"UPDATE features SET {', '.join(feat_fields)} WHERE reading_id = ?", feat_params)
+        
+    anom_fields = []
+    anom_params = []
+    if payload.anomaly_score is not None:
+        anom_fields.append("anomaly_score = ?")
+        anom_params.append(payload.anomaly_score)
+    if payload.status is not None:
+        anom_fields.append("severity = ?")
+        anom_params.append(payload.status)
+        anom_fields.append("is_anomaly = ?")
+        anom_params.append(1 if payload.status != "Normal" else 0)
+    if anom_fields:
+        anom_params.append(reading_id)
+        cursor.execute(f"UPDATE anomalies SET {', '.join(anom_fields)} WHERE reading_id = ?", anom_params)
+        
+    if payload.health_score is not None:
+        cursor.execute("UPDATE health_logs SET health_score = ? WHERE reading_id = ?", (payload.health_score, reading_id))
+        
+    if payload.fault_type is not None:
+        cursor.execute("UPDATE fault_predictions SET fault_type = ? WHERE reading_id = ?", (payload.fault_type, reading_id))
+        
+    conn.commit()
+    conn.close()
+    return {"status": "success", "reading_id": reading_id, "message": f"Reading #{reading_id} updated successfully"}
+
+@app.post("/api/dataset/readings")
+def create_reading_endpoint(payload: ReadingCreatePayload):
+    ingest_payload = SensorIngestPayload(
+        motor_id=payload.motor_id,
+        temperature=payload.temperature_c,
+        ax=payload.ax,
+        ay=payload.ay,
+        az=payload.az,
+        pwm_duty=payload.pwm_duty,
+        source=payload.source
+    )
+    res = process_sensor_reading(ingest_payload)
+    if payload.fault_type:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE fault_predictions SET fault_type = ? WHERE reading_id = ?", (payload.fault_type, res["reading_id"]))
+        conn.commit()
+        conn.close()
+    if payload.vibration_rms is not None:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE features SET vibration_rms = ? WHERE reading_id = ?", (payload.vibration_rms, res["reading_id"]))
+        conn.commit()
+        conn.close()
+    return {"status": "success", "reading_id": res["reading_id"], "data": res}
+
 
 @app.get("/api/settings")
 def get_system_settings():

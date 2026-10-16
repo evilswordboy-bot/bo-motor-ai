@@ -309,6 +309,7 @@
     <div class="nav-item" onclick="showView('faults', this)">🔍 Fault Classification</div>
     <div class="nav-item" onclick="showView('maintenance', this)">🛠️ Maintenance & CBM</div>
     <div class="nav-item" onclick="showView('simulator', this)">🎮 Simulator Sandbox</div>
+    <div class="nav-item" onclick="showView('csvstudio', this)">📁 CSV Studio & Editor</div>
     <div class="nav-item" onclick="showView('dataset', this)">📋 Dataset Explorer</div>
     <div class="nav-item" onclick="showView('firmware', this)">📟 ESP32 Firmware</div>
     <div class="nav-item" onclick="showView('settings', this)">⚙️ Settings</div>
@@ -575,6 +576,72 @@
           <input type="range" id="simNoiseSlider" min="1" max="25" value="5" oninput="updateNoise(this.value)">
         </div>
       </div>
+    </div>
+  </div>
+
+  <!-- VIEW: CSV STUDIO & DATA EDITOR -->
+  <div id="view-csvstudio" class="view-content">
+    <div class="chart-card">
+      <div class="chart-header">
+        <span class="chart-title">📁 CSV Studio: Upload, Delete & Editable Telemetry Grid</span>
+        <button class="btn" onclick="downloadCSV()">📥 Export CSV</button>
+      </div>
+
+      <!-- Controls Row -->
+      <div style="display:flex; flex-wrap:wrap; gap:16px; margin-bottom:20px; align-items:center; background:#0F172A; padding:16px; border-radius:8px; border:1px solid var(--card-border);">
+        <div class="control-group">
+          <label style="font-weight:700; color:#FFF;">Upload Custom CSV:</label>
+          <input type="file" id="offlineCsvInput" accept=".csv" onchange="handleOfflineCsvUpload(event)" style="padding:6px; font-size:0.8rem;">
+        </div>
+
+        <div class="control-group">
+          <label style="font-weight:700; color:#FFF;">Ingestion Mode:</label>
+          <select id="offlineUploadMode" style="padding:6px 10px;">
+            <option value="append">Append to Telemetry Buffer</option>
+            <option value="replace">Replace Existing Telemetry</option>
+          </select>
+        </div>
+
+        <div style="display:flex; gap:8px; align-items:flex-end;">
+          <button class="btn" style="background:#EF4444; color:#FFF;" onclick="clearOfflineReal()">🗑️ Clear Real Data</button>
+          <button class="btn" style="background:#334155; color:#CBD5E1;" onclick="clearOfflineSynthetic()">🗑️ Clear Synthetic</button>
+          <button class="btn" style="background:#1E293B; color:#F87171;" onclick="purgeOfflineData()">⚠️ Purge All</button>
+        </div>
+      </div>
+
+      <!-- Add Row Row -->
+      <div style="display:flex; flex-wrap:wrap; gap:10px; margin-bottom:16px; align-items:center; background:#090D14; padding:12px; border-radius:8px; border:1px solid var(--card-border);">
+        <span style="font-size:0.8rem; font-weight:700; color:var(--accent-cyan);">➕ Add Reading:</span>
+        <input type="number" id="newTemp" placeholder="Temp °C" value="35.0" step="0.5" style="width:90px; padding:4px 8px;">
+        <input type="number" id="newPWM" placeholder="PWM %" value="85" step="5" style="width:80px; padding:4px 8px;">
+        <input type="number" id="newVib" placeholder="Vib RMS g" value="0.22" step="0.02" style="width:95px; padding:4px 8px;">
+        <select id="newFault" style="padding:4px 8px;">
+          <option value="Normal">Normal</option>
+          <option value="Imbalance">Imbalance</option>
+          <option value="Misalignment">Misalignment</option>
+          <option value="GearWear">GearWear</option>
+          <option value="Overheating">Overheating</option>
+          <option value="Looseness">Looseness</option>
+        </select>
+        <button class="btn" style="padding:6px 12px; font-size:0.8rem; background:var(--accent-green);" onclick="addOfflineManualRow()">Add Row</button>
+      </div>
+
+      <!-- Editable Table -->
+      <table id="csvStudioTable">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Time</th>
+            <th>Source</th>
+            <th>Temp (°C)</th>
+            <th>Vib RMS (g)</th>
+            <th>Health (%)</th>
+            <th>Status</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="csvStudioBody"></tbody>
+      </table>
     </div>
   </div>
 
@@ -880,7 +947,170 @@ if (REAL_DATASET && REAL_DATASET.length > 0) {
       </tr>
     `).join('');
   }
+
+  // Update Csv Studio Table if active
+  const csvStudioView = document.getElementById('view-csvstudio');
+  if (csvStudioView && csvStudioView.classList.contains('active')) {
+    renderCsvStudioTable();
+  }
 }, 800);
+
+function renderCsvStudioTable() {
+  const tbody = document.getElementById('csvStudioBody');
+  if (!tbody) return;
+  const recent = historyData.slice(-25).reverse();
+  tbody.innerHTML = recent.map((r, idx) => {
+    const realIdx = historyData.length - 1 - idx;
+    return `
+      <tr>
+        <td style="color:#64748B;">#${realIdx + 1}</td>
+        <td>${r.time}</td>
+        <td><span class="badge ${r.source === 'real' ? 'badge-live' : 'badge-demo'}" style="padding:2px 6px; font-size:0.68rem;">${r.source || 'synthetic'}</span></td>
+        <td><input type="number" step="0.1" value="${r.temp || 30}" style="width:70px; padding:2px 4px; font-size:0.75rem;" onchange="editOfflineItem(${realIdx}, 'temp', this.value)"></td>
+        <td><input type="number" step="0.01" value="${r.v_rms || 0.2}" style="width:75px; padding:2px 4px; font-size:0.75rem;" onchange="editOfflineItem(${realIdx}, 'v_rms', this.value)"></td>
+        <td><input type="number" step="1" min="0" max="100" value="${r.health || 90}" style="width:65px; padding:2px 4px; font-size:0.75rem;" onchange="editOfflineItem(${realIdx}, 'health', this.value)"></td>
+        <td>
+          <select style="padding:2px 4px; font-size:0.75rem;" onchange="editOfflineItem(${realIdx}, 'status', this.value)">
+            <option value="NORMAL" ${r.status === 'NORMAL' ? 'selected' : ''}>NORMAL</option>
+            <option value="WARNING" ${r.status === 'WARNING' ? 'selected' : ''}>WARNING</option>
+            <option value="CRITICAL" ${r.status === 'CRITICAL' ? 'selected' : ''}>CRITICAL</option>
+          </select>
+        </td>
+        <td><button onclick="deleteOfflineItem(${realIdx})" style="background:transparent; border:none; cursor:pointer; color:#EF4444; font-size:0.9rem;" title="Delete row">🗑️</button></td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function editOfflineItem(idx, field, val) {
+  if (historyData[idx]) {
+    if (field === 'temp' || field === 'v_rms' || field === 'health') {
+      historyData[idx][field] = parseFloat(val);
+    } else {
+      historyData[idx][field] = val;
+    }
+  }
+}
+
+function deleteOfflineItem(idx) {
+  if (confirm('Delete this telemetry row?')) {
+    historyData.splice(idx, 1);
+    renderCsvStudioTable();
+  }
+}
+
+function addOfflineManualRow() {
+  const temp = parseFloat(document.getElementById('newTemp').value) || 35.0;
+  const pwm = parseFloat(document.getElementById('newPWM').value) || 80.0;
+  const v_rms = parseFloat(document.getElementById('newVib').value) || 0.22;
+  const fault = document.getElementById('newFault').value;
+  const health = Math.max(5, Math.min(100, Math.round(100 - (v_rms - 0.2) * 110)));
+  const status = v_rms > 0.8 || temp > 60 ? 'CRITICAL' : (v_rms > 0.4 || temp > 45 ? 'WARNING' : 'NORMAL');
+  
+  historyData.push({
+    time: new Date().toLocaleTimeString(),
+    ax: (Math.random() * 0.2).toFixed(3),
+    ay: (Math.random() * 0.2).toFixed(3),
+    az: (0.98 + (Math.random() - 0.5) * 0.1).toFixed(3),
+    v_rms: v_rms,
+    v_peak: (v_rms * 1.5).toFixed(3),
+    temp: temp,
+    rpm: Math.round((pwm / 100.0) * 200.0),
+    health: health,
+    anomalyScore: status === 'CRITICAL' ? 0.85 : (status === 'WARNING' ? 0.55 : 0.12),
+    status: status,
+    source: 'real'
+  });
+  
+  renderCsvStudioTable();
+  alert('Reading added successfully!');
+}
+
+function handleOfflineCsvUpload(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const mode = document.getElementById('offlineUploadMode').value;
+  
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    const text = e.target.result;
+    const lines = text.trim().split('\n');
+    if (lines.length < 2) {
+      alert('CSV file is empty or invalid.');
+      return;
+    }
+    const headers = lines[0].split(',').map(h => h.trim().toLowerCase());
+    const newItems = [];
+    
+    for (let i = 1; i < lines.length; i++) {
+      const parts = lines[i].split(',').map(p => p.trim());
+      if (parts.length < 3) continue;
+      
+      let temp = 30.5, ax = 0.1, ay = 0.1, az = 0.98, vib = 0.2, pwm = 80, health = 90, status = 'NORMAL';
+      
+      headers.forEach((h, colIdx) => {
+        const val = parts[colIdx];
+        if (h.includes('temp')) temp = parseFloat(val) || temp;
+        if (h.includes('accel') && h.includes('x')) ax = parseFloat(val) || ax;
+        if (h.includes('accel') && h.includes('y')) ay = parseFloat(val) || ay;
+        if (h.includes('accel') && h.includes('z')) az = parseFloat(val) || az;
+        if (h.includes('vib')) vib = parseFloat(val) || vib;
+        if (h.includes('pwm')) pwm = parseFloat(val) || pwm;
+        if (h.includes('health')) health = parseFloat(val) || health;
+        if (h.includes('status')) status = (val || 'NORMAL').toUpperCase();
+      });
+      
+      newItems.push({
+        time: new Date(Date.now() - (lines.length - i) * 1000).toLocaleTimeString(),
+        ax: ax,
+        ay: ay,
+        az: az,
+        v_rms: vib,
+        v_peak: (vib * 1.5).toFixed(3),
+        temp: temp,
+        rpm: Math.round((pwm / 100.0) * 200.0),
+        health: health,
+        anomalyScore: status === 'CRITICAL' ? 0.85 : (status === 'WARNING' ? 0.55 : 0.12),
+        status: status,
+        source: 'real'
+      });
+    }
+    
+    if (mode === 'replace') {
+      historyData = newItems.slice(-60);
+    } else {
+      historyData = historyData.concat(newItems.slice(-30));
+    }
+    
+    renderCsvStudioTable();
+    alert(`Successfully loaded ${newItems.length} records from ${file.name}!`);
+  };
+  reader.readAsText(file);
+}
+
+function clearOfflineReal() {
+  if (confirm('Clear all real telemetry records from buffer?')) {
+    historyData = historyData.filter(r => r.source !== 'real');
+    renderCsvStudioTable();
+    alert('Cleared real telemetry records.');
+  }
+}
+
+function clearOfflineSynthetic() {
+  if (confirm('Clear all synthetic demo records?')) {
+    historyData = historyData.filter(r => r.source === 'real');
+    renderCsvStudioTable();
+    alert('Cleared synthetic demo records.');
+  }
+}
+
+function purgeOfflineData() {
+  if (confirm('Purge all telemetry records?')) {
+    historyData = [];
+    renderCsvStudioTable();
+    alert('Buffer cleared.');
+  }
+}
 
 function downloadCSV() {
   const headers = ['time', 'ax', 'ay', 'az', 'vibration_rms', 'vibration_peak', 'temperature_c', 'rpm_estimated', 'source'];

@@ -13,7 +13,8 @@ import {
   Settings,
   Zap,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  FileSpreadsheet
 } from 'lucide-react';
 
 const NAV_ITEMS = [
@@ -25,6 +26,7 @@ const NAV_ITEMS = [
   { id: 'fault', label: 'Fault Classification', icon: Cpu },
   { id: 'maintenance', label: 'Maintenance Prediction', icon: Wrench },
   { id: 'historical', label: 'Historical Analysis', icon: Clock },
+  { id: 'csv_studio', label: 'CSV Data Studio', icon: FileSpreadsheet },
   { id: 'dataset', label: 'Dataset', icon: Database },
   { id: 'model', label: 'Model Performance', icon: BarChart3 },
   { id: 'settings', label: 'System Settings', icon: Settings },
