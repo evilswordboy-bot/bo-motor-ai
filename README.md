@@ -25,6 +25,24 @@
 
 ---
 
+## 🌐 Live Web Demos & Links
+
+- **Streamlit Web App (Live Public)**: [https://holland-southeast-roger-abroad.trycloudflare.com](https://holland-southeast-roger-abroad.trycloudflare.com)
+- **FastAPI + React Dashboard (Live Public)**: [https://attempting-reach-carol-comfort.trycloudflare.com](https://attempting-reach-carol-comfort.trycloudflare.com)
+- **Download Standalone Offline HTML ZIP**: [Download Offline HTML ZIP](https://attempting-reach-carol-comfort.trycloudflare.com/api/download/offline-html-zip)
+- **Download Full Source ZIP**: [Download bo-motor-ai.zip](https://attempting-reach-carol-comfort.trycloudflare.com/api/download/project-zip)
+- **Local Streamlit**: `http://localhost:8501`
+- **Local FastAPI**: `http://localhost:8000`
+
+---
+
+## 📊 Ingested Real Telemetry Dataset (`DOC-20261012-WA0014.csv`)
+- **1,689 ESP32 Telemetry Records** recorded at ~1 Hz with physical 3-axis MPU6050 vibrations up to 1.865g.
+- **Trained Model Accuracy**: 99.64% | **Weighted F1**: 99.64% on 14,077 total records.
+- **Physical Ground Truth**: Features real-world motor state transitions (`NORMAL`, `WARNING`, and `CRITICAL`).
+
+---
+
 ## 🚀 Instant Streamlit Cloud Deployment
 Click the badge above or navigate to:
 **[https://share.streamlit.io/deploy?repository=evilswordboy-bot/bo-motor-ai&branch=main&mainModule=streamlit_app.py](https://share.streamlit.io/deploy?repository=evilswordboy-bot/bo-motor-ai&branch=main&mainModule=streamlit_app.py)**
