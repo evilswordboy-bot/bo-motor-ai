@@ -27,10 +27,10 @@
 
 ## 🌐 Live Web Demos & Links
 
-- **Streamlit Web App (Live Public)**: [https://placement-adams-benjamin-lodging.trycloudflare.com](https://placement-adams-benjamin-lodging.trycloudflare.com)
-- **FastAPI + React Dashboard (Live Public)**: [https://holders-pound-consolidation-namespace.trycloudflare.com](https://holders-pound-consolidation-namespace.trycloudflare.com)
-- **Download Standalone Offline HTML ZIP**: [Download Offline HTML ZIP](https://holders-pound-consolidation-namespace.trycloudflare.com/api/download/offline-html-zip)
-- **Download Full Source ZIP**: [Download bo-motor-ai.zip](https://holders-pound-consolidation-namespace.trycloudflare.com/api/download/project-zip)
+- **Streamlit Web App (Live Public)**: [https://promotional-census-decade-vegetable.trycloudflare.com](https://promotional-census-decade-vegetable.trycloudflare.com)
+- **FastAPI + React Dashboard (Live Public)**: [https://odds-deviation-men-tone.trycloudflare.com](https://odds-deviation-men-tone.trycloudflare.com)
+- **Download Full Complete ZIP**: [Download bo-motor-ai-complete.zip](https://odds-deviation-men-tone.trycloudflare.com/api/download/complete-zip)
+- **Download Standalone Offline HTML ZIP**: [Download Offline HTML ZIP](https://odds-deviation-men-tone.trycloudflare.com/api/download/offline-html-zip)
 - **Local Streamlit**: `http://localhost:8501`
 - **Local FastAPI**: `http://localhost:8000`
 
