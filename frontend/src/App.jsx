@@ -166,6 +166,9 @@ export function App() {
           onInjectSample={handleInjectSample}
           simulatorActive={statusData.simulator_active}
           onToggleSimulator={handleToggleSimulator}
+          onNavigate={setCurrentView}
+          onRefresh={loadOverview}
+          statusData={statusData}
         />
 
         <main className="flex-1 p-4 lg:p-8 max-w-7xl w-full mx-auto">

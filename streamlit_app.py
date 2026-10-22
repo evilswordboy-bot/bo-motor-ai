@@ -255,82 +255,110 @@ def load_or_train_ml():
 iso_forest, scaler, rf_classifier, anomaly_cols, feat_cols = load_or_train_ml()
 
 # -----------------------------------------------------------------------------
-# SESSION STATE INITIALIZATION
+# CSV WATCHER & INGESTION HELPER
 # -----------------------------------------------------------------------------
+WATCHED_DOWNLOADS_CSV = r"C:\Users\Sakthibalan\Downloads\DOC-20261012-WA0014.csv"
+
+def parse_csv_to_history_records(file_path):
+    if not os.path.exists(file_path):
+        return []
+    try:
+        raw_df = pd.read_csv(file_path)
+        col_l = {str(c).strip().lower(): c for c in raw_df.columns}
+
+        def get_c(row, *cands, default=0.0):
+            for cand in cands:
+                if cand.lower() in col_l:
+                    try:
+                        val = row[col_l[cand.lower()]]
+                        if pd.notna(val):
+                            return float(val)
+                    except:
+                        pass
+            return default
+
+        def get_s(row, *cands, default=""):
+            for cand in cands:
+                if cand.lower() in col_l:
+                    val = row[col_l[cand.lower()]]
+                    if pd.notna(val):
+                        return str(val)
+            return default
+
+        records = []
+        now = datetime.now()
+        df_valid = raw_df.tail(200)
+        for idx, (_, row) in enumerate(df_valid.iterrows()):
+            temp = get_c(row, "Temperature_C", "temperature_c", "temperature", "temp", default=32.0)
+            ax = get_c(row, "Acceleration_X", "ax", default=0.1)
+            ay = get_c(row, "Acceleration_Y", "ay", default=0.12)
+            az = get_c(row, "Acceleration_Z", "az", default=0.98)
+            pwm = get_c(row, "Motor_PWM", "Motor_Percent", "pwm_duty", "pwm", default=80.0)
+            if pwm > 100.0:
+                pwm = round((pwm / 255.0) * 100.0, 1)
+            vib_g = get_c(row, "Vibration_g", "vibration_rms", "vibration", default=None)
+            v_rms = vib_g if vib_g is not None and vib_g > 0 else round(math.sqrt(ax**2 + ay**2 + (az - 1.0)**2), 3)
+            v_peak = round(v_rms * 1.5, 3)
+            h_score = get_c(row, "Health_Score", "health_score", default=90.0)
+            status_str = get_s(row, "Status", "status", default="Normal")
+            fault_type = "Normal" if "NORM" in status_str.upper() else ("Bearing / Gear Wear" if "CRIT" in status_str.upper() else "Mechanical Imbalance")
+            rpm = round((pwm / 100.0) * 200.0 * (1.0 - min(0.20, v_rms * 0.08)), 1)
+
+            ts = now - timedelta(seconds=(len(df_valid) - idx) * 2)
+            records.append({
+                "timestamp": ts,
+                "ax": ax,
+                "ay": ay,
+                "az": az,
+                "accel_magnitude": round(math.sqrt(ax**2 + ay**2 + az**2), 3),
+                "vibration_rms": v_rms,
+                "vibration_peak": v_peak,
+                "temperature_c": temp,
+                "temperature_rate": 0.02,
+                "vibration_rate": 0.005,
+                "rpm_estimated": rpm,
+                "health_score": h_score,
+                "fault_type": fault_type,
+                "source": "real"
+            })
+        return records
+    except Exception as e:
+        print(f"Error parsing CSV {file_path}: {e}")
+        return []
+
+# -----------------------------------------------------------------------------
+# SESSION STATE INITIALIZATION & AUTO-WATCHER
+# -----------------------------------------------------------------------------
+if "is_empty_state" not in st.session_state:
+    st.session_state.is_empty_state = False
+
+if "last_watched_mtime" not in st.session_state:
+    if os.path.exists(WATCHED_DOWNLOADS_CSV):
+        st.session_state.last_watched_mtime = os.path.getmtime(WATCHED_DOWNLOADS_CSV)
+    else:
+        st.session_state.last_watched_mtime = 0
+
 if "fault_mode" not in st.session_state:
     st.session_state.fault_mode = "Normal"
 if "pwm_duty" not in st.session_state:
     st.session_state.pwm_duty = 85.0
 if "history" not in st.session_state:
-    csv_file = os.path.join(os.path.dirname(__file__), "data", "esp32_hardware_telemetry.csv")
-    history_records = []
-    if os.path.exists(csv_file):
-        try:
-            df_real = pd.read_csv(csv_file)
-            df_valid = df_real[(df_real["Temperature_C"] > 0) | (df_real["Vibration_g"] > 0) | (df_real["Motor_PWM"] > 0)].tail(100)
-            now = datetime.now()
-            for idx, (_, row) in enumerate(df_valid.iterrows()):
-                ts = now - timedelta(seconds=(len(df_valid) - idx) * 2)
-                ax = float(row["Acceleration_X"])
-                ay = float(row["Acceleration_Y"])
-                az = float(row["Acceleration_Z"])
-                vib_g = float(row["Vibration_g"])
-                temp = float(row["Temperature_C"]) if float(row["Temperature_C"]) > 0 else 30.5
-                pwm = float(row["Motor_PWM"]) / 255.0 * 100.0 if "Motor_PWM" in row else 80.0
-                rpm = round((pwm / 100.0) * 200.0 * (1.0 - min(0.2, vib_g * 0.08)), 1)
-                st_label = str(row["Status"]).strip().upper()
-                h_score = float(row["Health_Score"]) if "Health_Score" in row else 95.0
-                
-                f_type = "Normal"
-                if st_label == "CRITICAL":
-                    f_type = "Bearing / Gear Wear" if vib_g > 0.5 else "Mechanical Imbalance"
-                elif st_label == "WARNING":
-                    f_type = "Shaft Misalignment" if ax > 0.2 else "Mechanical Imbalance"
-                    
-                history_records.append({
-                    "timestamp": ts,
-                    "ax": ax,
-                    "ay": ay,
-                    "az": az,
-                    "accel_magnitude": round(math.sqrt(ax*ax + ay*ay + az*az), 3),
-                    "vibration_rms": round(max(0.04, vib_g), 3),
-                    "vibration_peak": round(max(0.06, vib_g * 1.45), 3),
-                    "temperature_c": round(temp, 2),
-                    "temperature_rate": 0.04,
-                    "vibration_rate": 0.002,
-                    "rpm_estimated": rpm,
-                    "health_score": h_score,
-                    "fault_type": f_type,
-                    "source": "real"
-                })
-        except Exception as e:
-            history_records = []
-            
-    if not history_records:
-        now = datetime.now()
-        base_t = 34.0
-        for i in range(60, 0, -1):
-            ts = now - timedelta(seconds=i * 2)
-            v_rms = 0.20 + 0.04 * math.sin(i * 0.2) + np.random.normal(0, 0.015)
-            temp = base_t + 0.05 * (60 - i) + np.random.normal(0, 0.15)
-            rpm = round(85.0 * 2.35 * (1.0 - min(0.15, v_rms * 0.08)), 1)
-            history_records.append({
-                "timestamp": ts,
-                "ax": round(math.sin(i * 0.4) * 0.18 + np.random.normal(0, 0.02), 3),
-                "ay": round(math.cos(i * 0.4) * 0.14 + np.random.normal(0, 0.02), 3),
-                "az": round(0.98 + math.sin(i * 0.8) * 0.06 + np.random.normal(0, 0.02), 3),
-                "accel_magnitude": round(1.0 + v_rms * 0.7, 3),
-                "vibration_rms": round(max(0.05, v_rms), 3),
-                "vibration_peak": round(v_rms * 1.45, 3),
-                "temperature_c": round(temp, 2),
-                "temperature_rate": 0.04,
-                "vibration_rate": 0.002,
-                "rpm_estimated": rpm,
-                "health_score": round(max(0, min(100, 100 - (v_rms - 0.20) * 120)), 1),
-                "fault_type": "Normal",
-                "source": "synthetic"
-            })
-    st.session_state.history = history_records
+    st.session_state.history = parse_csv_to_history_records(WATCHED_DOWNLOADS_CSV)
+    if not st.session_state.history:
+        local_csv = os.path.join(os.path.dirname(__file__), "data", "esp32_hardware_telemetry.csv")
+        st.session_state.history = parse_csv_to_history_records(local_csv)
+
+# Auto-detect file updates on WATCHED_DOWNLOADS_CSV
+file_just_updated = False
+if os.path.exists(WATCHED_DOWNLOADS_CSV):
+    current_mtime = os.path.getmtime(WATCHED_DOWNLOADS_CSV)
+    if current_mtime > st.session_state.last_watched_mtime:
+        st.session_state.last_watched_mtime = current_mtime
+        reloaded = parse_csv_to_history_records(WATCHED_DOWNLOADS_CSV)
+        if reloaded:
+            st.session_state.history = reloaded
+            st.session_state.is_empty_state = False
+            file_just_updated = True
 
 # -----------------------------------------------------------------------------
 # SIDEBAR NAVIGATION & CONTROLS
@@ -357,6 +385,31 @@ with st.sidebar:
         index=0
     )
     
+    st.markdown("--- ")
+    st.markdown("#### 📁 CSV Watcher & Stream State")
+    if st.session_state.is_empty_state or len(st.session_state.history) == 0:
+        st.markdown("<span style='color:#F59E0B; font-weight:700;'>🟡 INITIAL EMPTY STATE</span>", unsafe_allow_html=True)
+        st.caption("Waiting for CSV updates to run automatically.")
+    else:
+        st.markdown("<span style='color:#10B981; font-weight:700;'>🟢 STREAMING CSV</span>", unsafe_allow_html=True)
+        st.caption("Watching `DOC-20261012-WA0014.csv`")
+
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button("🔄 Run CSV", use_container_width=True, help="Load DOC-20261012-WA0014.csv and start streaming"):
+            reloaded = parse_csv_to_history_records(WATCHED_DOWNLOADS_CSV)
+            if reloaded:
+                st.session_state.history = reloaded
+                st.session_state.is_empty_state = False
+                st.rerun()
+            else:
+                st.error("File not found or empty.")
+    with col_btn2:
+        if st.button("🗑️ Empty", use_container_width=True, help="Reset to initial clean empty state"):
+            st.session_state.history = []
+            st.session_state.is_empty_state = True
+            st.rerun()
+
     st.markdown("--- ")
     st.markdown("#### 🎮 Telemetry Source")
     data_source_mode = st.radio(
@@ -503,6 +556,18 @@ risk_color_class = f"risk-{cbm_risk.lower()[:4]}"
 # VIEW 1: OVERVIEW DASHBOARD
 # =============================================================================
 if page == "🎛️ Overview Dashboard":
+    if st.session_state.is_empty_state or len(st.session_state.history) == 0:
+        st.info("⚠️ **System Initialized in Clean / Empty State.**\nThe engine is watching `DOC-20261012-WA0014.csv`. Whenever this file is updated or saved, the system will automatically reload and stream live telemetry.")
+        col_act1, col_act2 = st.columns([1, 2])
+        with col_act1:
+            if st.button("🚀 Start Run with DOC-20261012-WA0014.csv", type="primary"):
+                st.session_state.history = parse_csv_to_history_records(WATCHED_DOWNLOADS_CSV)
+                st.session_state.is_empty_state = False
+                st.rerun()
+        with col_act2:
+            st.markdown("Or navigate to **📁 CSV Studio & Data Editor** from the sidebar to edit or upload custom telemetry.")
+        st.markdown("--- ")
+
     c1, c2, c3, c4, c5, c6 = st.columns(6)
     
     with c1:

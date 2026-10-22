@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Thermometer,
   Radio,
@@ -11,7 +11,14 @@ import {
   Shield,
   Layers,
   Wrench,
-  ExternalLink
+  ExternalLink,
+  Upload,
+  RefreshCw,
+  Edit3,
+  Trash2,
+  Database,
+  Play,
+  Sparkles
 } from 'lucide-react';
 import { RadialHealthGauge, DonutChart } from './Charts';
 
@@ -50,6 +57,84 @@ export function OverviewView({
 
   return (
     <div className="space-y-6">
+      {/* INITIAL EMPTY STATE HERO BANNER OR ACTIVE DATASET CONTROLS */}
+      {overviewData.is_empty ? (
+        <div className="glass-card rounded-2xl p-6 border-2 border-dashed border-amber-500/50 bg-amber-950/20 text-center relative overflow-hidden">
+          <div className="max-w-2xl mx-auto space-y-4">
+            <div className="inline-flex items-center justify-center p-3 rounded-2xl bg-amber-500/20 text-amber-300 border border-amber-500/30">
+              <Database className="w-8 h-8" />
+            </div>
+            <div>
+              <h2 className="text-xl font-bold text-white tracking-tight">System Initialized in Clean / Empty State</h2>
+              <p className="text-sm text-slate-300 mt-1">
+                The engine is currently waiting for CSV telemetry. Whenever <code className="text-cyan-300 bg-navy-900 px-1.5 py-0.5 rounded border border-navy-700">DOC-20261012-WA0014.csv</code> is updated or saved, the system will automatically detect the change and begin processing live data from Row 1.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
+              <button
+                onClick={async () => {
+                  await fetch('/api/csv/reload', { method: 'POST' });
+                  window.location.reload();
+                }}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-lg transition-all"
+              >
+                <Play className="w-4 h-4 fill-current" />
+                <span>Start Run with DOC-20261012-WA0014.csv</span>
+              </button>
+              <button
+                onClick={() => onNavigate && onNavigate('csv_studio')}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-navy-800 hover:bg-navy-700 border border-cyan-500/40 text-cyan-300 font-semibold text-xs transition-all"
+              >
+                <Edit3 className="w-4 h-4 text-cyan-400" />
+                <span>Upload & Edit in CSV Studio</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="glass-card rounded-xl px-4 py-3 border border-cyan-500/30 bg-cyan-950/20 flex flex-wrap items-center justify-between gap-3 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="font-semibold text-slate-200">Active Telemetry Source:</span>
+            <span className="font-mono text-cyan-300 bg-navy-900 px-2 py-0.5 rounded border border-cyan-500/30">
+              {overviewData.provenance?.active_file || 'DOC-20261012-WA0014.csv'}
+            </span>
+            <span className="text-slate-400 hidden md:inline">• Auto-runs on file update</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => onNavigate && onNavigate('csv_studio')}
+              className="px-2.5 py-1 rounded bg-navy-800 hover:bg-navy-700 text-amber-300 border border-amber-500/40 font-mono font-semibold flex items-center gap-1"
+            >
+              <Edit3 className="w-3 h-3" />
+              <span>Edit Telemetry</span>
+            </button>
+            <button
+              onClick={async () => {
+                await fetch('/api/csv/reload', { method: 'POST' });
+                window.location.reload();
+              }}
+              className="px-2.5 py-1 rounded bg-navy-800 hover:bg-navy-700 text-emerald-300 border border-emerald-500/40 font-mono font-semibold flex items-center gap-1"
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>Reload</span>
+            </button>
+            <button
+              onClick={async () => {
+                if (confirm('Reset to initial empty state?')) {
+                  await fetch('/api/csv/empty', { method: 'POST' });
+                  window.location.reload();
+                }
+              }}
+              className="px-2.5 py-1 rounded bg-navy-800 hover:bg-navy-700 text-rose-300 border border-rose-500/40 font-mono font-semibold flex items-center gap-1"
+            >
+              <Trash2 className="w-3 h-3" />
+              <span>Empty State</span>
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* 5 TOP KPI CARDS */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
         {/* CARD 1: MOTOR TEMPERATURE */}

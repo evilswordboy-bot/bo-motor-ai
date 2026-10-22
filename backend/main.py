@@ -17,6 +17,7 @@ from database import init_db, get_db_connection
 from feature_engineering import FeatureExtractor
 from ml_engine import ml_engine, FAULT_CLASSES, ANOMALY_FEATURES, FAULT_FEATURES
 from synthetic_generator import generate_bo_motor_dataset
+import pandas as pd
 
 # Initialize database
 init_db()
@@ -41,6 +42,15 @@ last_real_data_time: Optional[float] = None
 active_connections: List[WebSocket] = []
 simulator_running = True
 simulator_task = None
+
+# CSV Watcher & Playback state
+WATCHED_DOWNLOADS_CSV = r"C:\Users\Sakthibalan\Downloads\DOC-20261012-WA0014.csv"
+BACKEND_CSV_PATH = os.path.join(os.path.dirname(__file__), "data", "esp32_hardware_telemetry.csv")
+last_watched_mtime: Optional[float] = None
+is_empty_state: bool = False
+current_playback_index: int = 0
+current_csv_filename: str = "DOC-20261012-WA0014.csv"
+cached_csv_df: Optional[pd.DataFrame] = None
 
 # Pydantic Ingest Schema per specification
 class SensorIngestPayload(BaseModel):
@@ -334,12 +344,16 @@ def get_system_status():
     last_updated = last_row["timestamp"] if last_row else datetime.now().isoformat()
     conn.close()
 
-    if is_live:
+    total_count = real_count + synthetic_count
+    if is_empty_state or total_count == 0:
+        conn_state = "empty"
+        conn_label = "○ AWAITING CSV | Empty (Upload or update DOC-20261012-WA0014.csv to start run)"
+    elif is_live:
         conn_state = "live"
         conn_label = "● LIVE DATA | ESP32 Connected"
     elif real_count > 0:
         conn_state = "real_dataset"
-        conn_label = f"● REAL HARDWARE LOG | {real_count:,} ESP32 Telemetry Records"
+        conn_label = f"● RUNNING CSV TELEMETRY | {current_csv_filename} ({real_count:,} Records)"
     else:
         conn_state = "demo"
         conn_label = "● DEMO MODE | Simulated Sensor Data"
@@ -348,16 +362,36 @@ def get_system_status():
         "connection_state": conn_state,
         "connection_label": conn_label,
         "is_esp32_connected": is_live,
-        "simulator_active": simulator_running,
+        "simulator_active": simulator_running and not is_empty_state,
+        "is_empty": (is_empty_state or total_count == 0),
         "last_updated": last_updated,
         "real_records_count": real_count,
         "synthetic_records_count": synthetic_count,
-        "total_records_count": real_count + synthetic_count,
-        "motor_id": "BO_MOTOR_01"
+        "total_records_count": total_count,
+        "motor_id": "BO_MOTOR_01",
+        "csv_file": current_csv_filename,
+        "playback_index": current_playback_index
     }
 
 @app.get("/api/overview")
 def get_overview_dashboard():
+    if is_empty_state:
+        return {
+            "is_empty": True,
+            "kpis": {
+                "health": {"score": 100, "status": "Ready", "color": "emerald", "delta_pct": 0},
+                "vibration_rms": {"value": 0.0, "unit": "g", "delta": 0, "status": "Awaiting CSV"},
+                "temperature": {"value": 0.0, "unit": "°C", "delta": 0, "rate": 0, "status": "Awaiting CSV"},
+                "anomaly": {"score": 0.0, "status": "Normal", "level": "None"},
+                "estimated_rpm": {"value": 0, "pwm_duty": 0, "label": "Standby"},
+                "maintenance_risk": {"level": "Standby", "description": "No active telemetry. Upload or update DOC-20261012-WA0014.csv to start.", "color": "slate"}
+            },
+            "device": {"motor_id": "BO_MOTOR_01", "type": "BO DC Geared Motor (TT 1:48)", "driver": "L298N Dual H-Bridge", "imu": "MPU6050", "status": "AWAITING_CSV"},
+            "provenance": {"real_samples": 0, "synthetic_samples": 0, "total_samples": 0, "fault_conditions_count": len(FAULT_CLASSES), "models_in_use": "Isolation Forest + Random Forest"},
+            "recent_alerts": [],
+            "recent_readings": []
+        }
+
     conn = get_db_connection()
     cursor = conn.cursor()
 
@@ -379,7 +413,21 @@ def get_overview_dashboard():
 
     if not rows:
         conn.close()
-        raise HTTPException(status_code=404, detail="No sensor data found. Run /api/dataset/generate first.")
+        return {
+            "is_empty": True,
+            "kpis": {
+                "health": {"score": 100, "status": "Ready", "color": "emerald", "delta_pct": 0},
+                "vibration_rms": {"value": 0.0, "unit": "g", "delta": 0, "status": "Awaiting CSV"},
+                "temperature": {"value": 0.0, "unit": "°C", "delta": 0, "rate": 0, "status": "Awaiting CSV"},
+                "anomaly": {"score": 0.0, "status": "Normal", "level": "None"},
+                "estimated_rpm": {"value": 0, "pwm_duty": 0, "label": "Standby"},
+                "maintenance_risk": {"level": "Standby", "description": "No active telemetry. Upload or update DOC-20261012-WA0014.csv to start.", "color": "slate"}
+            },
+            "device": {"motor_id": "BO_MOTOR_01", "type": "BO DC Geared Motor (TT 1:48)", "driver": "L298N Dual H-Bridge", "imu": "MPU6050", "status": "AWAITING_CSV"},
+            "provenance": {"real_samples": 0, "synthetic_samples": 0, "total_samples": 0, "fault_conditions_count": len(FAULT_CLASSES), "models_in_use": "Isolation Forest + Random Forest"},
+            "recent_alerts": [],
+            "recent_readings": []
+        }
 
     latest = dict(rows[0])
     previous = dict(rows[1]) if len(rows) > 1 else latest
@@ -1091,114 +1139,14 @@ async def upload_dataset_csv(
     with open(os.path.join(root_data_dir, file.filename), "wb") as f:
         f.write(contents)
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    if mode == "replace":
-        cursor.execute("DELETE FROM features WHERE reading_id IN (SELECT id FROM sensor_readings WHERE source = 'real')")
-        cursor.execute("DELETE FROM anomalies WHERE reading_id IN (SELECT id FROM sensor_readings WHERE source = 'real')")
-        cursor.execute("DELETE FROM fault_predictions WHERE reading_id IN (SELECT id FROM sensor_readings WHERE source = 'real')")
-        cursor.execute("DELETE FROM health_logs WHERE reading_id IN (SELECT id FROM sensor_readings WHERE source = 'real')")
-        cursor.execute("DELETE FROM sensor_readings WHERE source = 'real'")
-        conn.commit()
+    inserted = ingest_csv_dataframe(df, file.filename)
 
-    col_map = {str(c).strip().lower(): c for c in df.columns}
-    
-    def get_val(row, *candidates, default=0.0):
-        for cand in candidates:
-            cand_l = cand.lower()
-            if cand_l in col_map:
-                try:
-                    val = row[col_map[cand_l]]
-                    if pd.notna(val):
-                        return float(val)
-                except:
-                    pass
-        return default
-
-    def get_str(row, *candidates, default=""):
-        for cand in candidates:
-            cand_l = cand.lower()
-            if cand_l in col_map:
-                val = row[col_map[cand_l]]
-                if pd.notna(val):
-                    return str(val)
-        return default
-
-    inserted = 0
-    now_base = datetime.now()
-    
-    for i, row in df.iterrows():
-        temp = get_val(row, "Temperature_C", "temperature_c", "temperature", "temp", default=32.0)
-        ax = get_val(row, "Acceleration_X", "ax", "accel_x", default=0.1)
-        ay = get_val(row, "Acceleration_Y", "ay", "accel_y", default=0.12)
-        az = get_val(row, "Acceleration_Z", "az", "accel_z", default=0.98)
-        pwm = get_val(row, "Motor_PWM", "Motor_Percent", "pwm_duty", "pwm", default=80.0)
-        if pwm > 100.0:
-            pwm = round((pwm / 255.0) * 100.0, 1)
-            
-        vib_g = get_val(row, "Vibration_g", "vibration_rms", "vibration", default=None)
-        h_score = get_val(row, "Health_Score", "health_score", "health", default=None)
-        status_raw = get_str(row, "Status", "status", "severity", default="NORMAL")
-        
-        status_map = {"NORMAL": "Normal", "WARNING": "Warning", "CRITICAL": "Critical"}
-        status = status_map.get(status_raw.upper(), "Normal")
-        
-        a_mag = round(math.sqrt(ax**2 + ay**2 + az**2), 4)
-        v_rms = vib_g if vib_g is not None and vib_g > 0 else round(math.sqrt(ax**2 + ay**2 + (az - 1.0)**2), 4)
-        v_peak = round(v_rms * 1.5, 4)
-        v_var = round(v_rms ** 2 * 0.25, 6)
-        rpm_est = round((pwm / 100.0) * 200.0 * (1.0 - min(0.20, v_rms * 0.08)), 1)
-        
-        ts_ms = get_val(row, "Timestamp_ms", default=None)
-        if ts_ms is not None:
-            ts_iso = (now_base - timedelta(milliseconds=(len(df) - i) * 1000)).isoformat()
-        else:
-            ts_str = get_str(row, "timestamp", "time", default=None)
-            ts_iso = ts_str if ts_str else (now_base - timedelta(seconds=(len(df) - i))).isoformat()
-            
-        cursor.execute("""
-        INSERT INTO sensor_readings (timestamp, motor_id, source, pwm_duty, ax, ay, az, gyro_x, gyro_y, gyro_z, temperature_c)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (ts_iso, "BO_MOTOR_01", "real", pwm, ax, ay, az, 0.0, 0.0, 0.0, temp))
-        reading_id = cursor.lastrowid
-        
-        cursor.execute("""
-        INSERT INTO features (reading_id, accel_magnitude, vibration_rms, vibration_peak, vibration_variance, temperature_c, temperature_rate, vibration_rate, rpm_estimated)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (reading_id, a_mag, v_rms, v_peak, v_var, temp, 0.0, 0.0, rpm_est))
-        
-        anom_score = 0.85 if status == "Critical" else (0.58 if status == "Warning" else 0.15)
-        is_anom = 1 if status != "Normal" else 0
-        cursor.execute("""
-        INSERT INTO anomalies (reading_id, timestamp, anomaly_score, is_anomaly, severity)
-        VALUES (?, ?, ?, ?, ?)
-        """, (reading_id, ts_iso, anom_score, is_anom, status))
-        
-        if h_score is None:
-            h_score = 50.0 if status == "Critical" else (75.0 if status == "Warning" else 95.0)
-        cursor.execute("""
-        INSERT INTO health_logs (reading_id, timestamp, health_score, vibration_risk, temperature_risk, trend_risk, anomaly_risk)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (reading_id, ts_iso, h_score, round(v_rms * 40, 1), round(max(0, temp - 35) * 2, 1), 5.0, round(anom_score * 30, 1)))
-        
-        f_type = "Bearing / Gear Wear" if status == "Critical" else ("Mechanical Imbalance" if status == "Warning" else "Normal")
-        cursor.execute("""
-        INSERT INTO fault_predictions (reading_id, timestamp, motor_id, fault_type, confidence, sensor_evidence)
-        VALUES (?, ?, ?, ?, ?, ?)
-        """, (reading_id, ts_iso, "BO_MOTOR_01", f_type, 92.5, json.dumps({"source": "csv_import"})))
-        
-        inserted += 1
-        
-    conn.commit()
-    conn.close()
-    
     return {
         "status": "success",
         "inserted_records": inserted,
         "filename": file.filename,
         "mode": mode,
-        "message": f"Successfully imported {inserted} records from {file.filename} (mode: {mode})."
+        "message": f"Successfully imported {inserted} records from {file.filename} and started live run!"
     }
 
 @app.delete("/api/dataset/readings/{reading_id}")
@@ -1368,47 +1316,217 @@ async def websocket_live_stream(websocket: WebSocket):
         if websocket in active_connections:
             active_connections.remove(websocket)
 
-# Background realistic continuous live simulator / playback task
-async def live_simulation_loop():
-    import random
-    step = 0
-    real_csv_path = os.path.join(os.path.dirname(__file__), "data", "esp32_hardware_telemetry.csv")
-    real_df = None
-    if os.path.exists(real_csv_path):
+def ingest_csv_dataframe(df: pd.DataFrame, source_name: str = "DOC-20261012-WA0014.csv"):
+    global cached_csv_df, current_csv_filename, current_playback_index, is_empty_state, simulator_running
+    
+    col_map = {str(c).strip().lower(): c for c in df.columns}
+    def get_c(row, *cands, default=0.0):
+        for c in cands:
+            if c.lower() in col_map:
+                try:
+                    val = row[col_map[c.lower()]]
+                    if pd.notna(val): return float(val)
+                except: pass
+        return default
+
+    def get_s(row, *cands, default=""):
+        for c in cands:
+            if c.lower() in col_map:
+                val = row[col_map[c.lower()]]
+                if pd.notna(val): return str(val)
+        return default
+
+    # Filter rows with non-zero values if raw log
+    valid_rows = []
+    for _, row in df.iterrows():
+        temp = get_c(row, "Temperature_C", "temperature_c", "temperature", default=0.0)
+        vib = get_c(row, "Vibration_g", "vibration_rms", "vibration", default=0.0)
+        pwm = get_c(row, "Motor_PWM", "Motor_Percent", "pwm_duty", default=0.0)
+        if temp > 0 or vib > 0 or pwm > 0:
+            valid_rows.append(row)
+            
+    filtered_df = pd.DataFrame(valid_rows) if len(valid_rows) > 0 else df.copy()
+    cached_csv_df = filtered_df.reset_index(drop=True)
+    current_csv_filename = source_name
+    current_playback_index = 0
+    is_empty_state = False
+    simulator_running = True
+    
+    # Save active telemetry copy to backend/data/esp32_hardware_telemetry.csv
+    data_dir = os.path.join(os.path.dirname(__file__), "data")
+    os.makedirs(data_dir, exist_ok=True)
+    cached_csv_df.to_csv(os.path.join(data_dir, "esp32_hardware_telemetry.csv"), index=False)
+    
+    # Also save to root data/
+    root_data = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+    os.makedirs(root_data, exist_ok=True)
+    cached_csv_df.to_csv(os.path.join(root_data, "esp32_hardware_telemetry.csv"), index=False)
+    
+    # Populate SQLite database
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM features WHERE reading_id IN (SELECT id FROM sensor_readings WHERE source = 'real')")
+    cursor.execute("DELETE FROM anomalies WHERE reading_id IN (SELECT id FROM sensor_readings WHERE source = 'real')")
+    cursor.execute("DELETE FROM fault_predictions WHERE reading_id IN (SELECT id FROM sensor_readings WHERE source = 'real')")
+    cursor.execute("DELETE FROM health_logs WHERE reading_id IN (SELECT id FROM sensor_readings WHERE source = 'real')")
+    cursor.execute("DELETE FROM sensor_readings WHERE source = 'real'")
+    
+    now_base = datetime.now()
+    N = len(cached_csv_df)
+    
+    for i, row in cached_csv_df.iterrows():
+        temp = get_c(row, "Temperature_C", "temperature_c", "temperature", default=32.0)
+        ax = get_c(row, "Acceleration_X", "ax", default=0.1)
+        ay = get_c(row, "Acceleration_Y", "ay", default=0.12)
+        az = get_c(row, "Acceleration_Z", "az", default=0.98)
+        pwm = get_c(row, "Motor_PWM", "Motor_Percent", "pwm_duty", default=80.0)
+        if pwm > 100.0: pwm = round((pwm / 255.0) * 100.0, 1)
+        vib_g = get_c(row, "Vibration_g", "vibration_rms", default=None)
+        h_score = get_c(row, "Health_Score", "health_score", default=90.0)
+        st_raw = get_s(row, "Status", "status", default="NORMAL").upper()
+        status = "Critical" if "CRIT" in st_raw else ("Warning" if "WARN" in st_raw else "Normal")
+        
+        a_mag = round(math.sqrt(ax**2 + ay**2 + az**2), 4)
+        v_rms = vib_g if vib_g is not None and vib_g > 0 else round(math.sqrt(ax**2 + ay**2 + (az - 1.0)**2), 4)
+        v_peak = round(v_rms * 1.5, 4)
+        v_var = round(v_rms ** 2 * 0.25, 6)
+        rpm_est = round((pwm / 100.0) * 200.0 * (1.0 - min(0.20, v_rms * 0.08)), 1)
+        ts_iso = (now_base - timedelta(seconds=(N - i))).isoformat()
+        
+        cursor.execute("""
+        INSERT INTO sensor_readings (timestamp, motor_id, source, pwm_duty, ax, ay, az, gyro_x, gyro_y, gyro_z, temperature_c)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (ts_iso, "BO_MOTOR_01", "real", pwm, ax, ay, az, 0.0, 0.0, 0.0, temp))
+        rid = cursor.lastrowid
+        
+        cursor.execute("""
+        INSERT INTO features (reading_id, timestamp, motor_id, accel_magnitude, vibration_rms, vibration_peak, vibration_variance, temperature_c, temperature_rate, vibration_rate, rpm_estimated)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (rid, ts_iso, "BO_MOTOR_01", a_mag, v_rms, v_peak, v_var, temp, 0.0, 0.0, rpm_est))
+        
+        anom_score = 0.85 if status == "Critical" else (0.55 if status == "Warning" else 0.15)
+        cursor.execute("""
+        INSERT INTO anomalies (reading_id, timestamp, motor_id, anomaly_score, is_anomaly, severity, features_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (rid, ts_iso, "BO_MOTOR_01", anom_score, 1 if status != "Normal" else 0, status, "{}"))
+        
+        cursor.execute("""
+        INSERT INTO health_logs (reading_id, timestamp, health_score, vibration_risk, temperature_risk, trend_risk, anomaly_risk)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (rid, ts_iso, h_score, round(v_rms * 40, 1), round(max(0, temp - 35) * 2, 1), 5.0, round(anom_score * 30, 1)))
+        
+        f_type = "Bearing / Gear Wear" if status == "Critical" else ("Mechanical Imbalance" if status == "Warning" else "Normal")
+        cursor.execute("""
+        INSERT INTO fault_predictions (reading_id, timestamp, motor_id, fault_type, confidence, evidence_json)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """, (rid, ts_iso, "BO_MOTOR_01", f_type, 92.5, json.dumps({"source": "csv_auto_watch"})))
+        
+    conn.commit()
+    conn.close()
+    print(f"[CSV Watcher] Loaded {N} rows from {source_name} and started running!")
+    return N
+
+@app.post("/api/csv/empty")
+def set_empty_state_endpoint():
+    global is_empty_state, simulator_running, cached_csv_df, current_playback_index
+    is_empty_state = True
+    simulator_running = False
+    current_playback_index = 0
+    for attempt in range(5):
         try:
-            raw_df = pd.read_csv(real_csv_path)
-            # Filter valid non-zero rows
-            real_df = raw_df[(raw_df["Temperature_C"] > 0) | (raw_df["Vibration_g"] > 0) | (raw_df["Motor_PWM"] > 0)].reset_index(drop=True)
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM features")
+            cursor.execute("DELETE FROM anomalies")
+            cursor.execute("DELETE FROM fault_predictions")
+            cursor.execute("DELETE FROM health_logs")
+            cursor.execute("DELETE FROM alerts")
+            cursor.execute("DELETE FROM sensor_readings")
+            conn.commit()
+            conn.close()
+            break
         except Exception as e:
-            print(f"Notice loading real CSV: {e}")
-            real_df = None
+            time.sleep(0.3)
+    return {"status": "success", "message": "Dashboard set to initial empty state. Update or upload CSV to start run."}
+
+@app.post("/api/csv/reload")
+def reload_csv_endpoint():
+    target = WATCHED_DOWNLOADS_CSV if os.path.exists(WATCHED_DOWNLOADS_CSV) else BACKEND_CSV_PATH
+    if not os.path.exists(target):
+        raise HTTPException(status_code=404, detail="CSV file not found in Downloads or backend data directory.")
+    df = pd.read_csv(target)
+    n = ingest_csv_dataframe(df, os.path.basename(target))
+    return {"status": "success", "rows": n, "filename": os.path.basename(target), "message": "CSV loaded and running!"}
+
+@app.get("/api/csv/status")
+def get_csv_status_endpoint():
+    target = WATCHED_DOWNLOADS_CSV if os.path.exists(WATCHED_DOWNLOADS_CSV) else BACKEND_CSV_PATH
+    mtime_str = datetime.fromtimestamp(os.path.getmtime(target)).strftime("%Y-%m-%d %H:%M:%S") if target and os.path.exists(target) else "N/A"
+    total_r = len(cached_csv_df) if cached_csv_df is not None else 0
+    return {
+        "is_empty": is_empty_state,
+        "is_running": simulator_running and not is_empty_state,
+        "watched_file": target,
+        "last_modified": mtime_str,
+        "playback_index": current_playback_index % total_r if total_r > 0 else 0,
+        "total_rows": total_r,
+        "filename": current_csv_filename
+    }
+
+# Background continuous live runner with CSV file watcher
+async def live_simulation_loop():
+    global last_watched_mtime, current_playback_index, simulator_running, is_empty_state, cached_csv_df
+    
+    # Initial load of CSV on startup
+    target_path = WATCHED_DOWNLOADS_CSV if os.path.exists(WATCHED_DOWNLOADS_CSV) else BACKEND_CSV_PATH
+    if target_path and os.path.exists(target_path):
+        try:
+            last_watched_mtime = os.path.getmtime(target_path)
+            df = pd.read_csv(target_path)
+            ingest_csv_dataframe(df, os.path.basename(target_path))
+        except Exception as e:
+            print(f"[CSV Watcher] Initial load notice: {e}")
 
     while True:
-        await asyncio.sleep(1.5)
-        # Only simulate if simulator_running is True and no live external ESP32 stream has been ingested in last 15s
+        await asyncio.sleep(1.2)
+        
+        # File Watcher: Detect if CSV file on disk was modified/updated
+        watch_target = WATCHED_DOWNLOADS_CSV if os.path.exists(WATCHED_DOWNLOADS_CSV) else BACKEND_CSV_PATH
+        if watch_target and os.path.exists(watch_target):
+            try:
+                mtime = os.path.getmtime(watch_target)
+                if last_watched_mtime is not None and mtime > last_watched_mtime:
+                    last_watched_mtime = mtime
+                    print(f"[CSV Watcher] File change detected on {watch_target}! Auto-ingesting and starting run...")
+                    df = pd.read_csv(watch_target)
+                    n = ingest_csv_dataframe(df, os.path.basename(watch_target))
+                    await broadcast_ws({
+                        "type": "csv_updated",
+                        "filename": os.path.basename(watch_target),
+                        "rows": n,
+                        "message": f"CSV updated on disk! Starting live telemetry run from row 1."
+                    })
+            except Exception as e:
+                print(f"[CSV Watcher] File check error: {e}")
+
+        # If in empty state or paused, do not stream
+        if is_empty_state or not simulator_running:
+            continue
+
         now = time.time()
         is_real_active = (last_real_data_time is not None and (now - last_real_data_time) < 15.0)
 
-        if simulator_running and not is_real_active and active_connections:
-            step += 1
-            if real_df is not None and len(real_df) > 0:
-                idx = step % len(real_df)
-                row = real_df.iloc[idx]
-                ax = float(row["Acceleration_X"])
-                ay = float(row["Acceleration_Y"])
-                az = float(row["Acceleration_Z"])
-                temp = float(row["Temperature_C"]) if float(row["Temperature_C"]) > 0 else 30.5
-                pwm = float(row["Motor_PWM"]) / 255.0 * 100.0 if "Motor_PWM" in row else 80.0
-                src = "real"
-            else:
-                pwm = 80.0 + 4.0 * math.sin(step / 30.0) + random.uniform(-1.0, 1.0)
-                f_rot = (pwm / 100.0) * 3.1
-                t_sec = step * 2.0
-                ax = 0.05 + 0.15 * math.sin(2 * math.pi * f_rot * t_sec) + random.gauss(0, 0.02)
-                ay = 0.08 + 0.15 * math.cos(2 * math.pi * f_rot * t_sec) + random.gauss(0, 0.02)
-                az = 0.98 + 0.05 * math.sin(4 * math.pi * f_rot * t_sec) + random.gauss(0, 0.02)
-                temp = 38.5 + 2.0 * math.sin(step / 60.0) + random.uniform(-0.2, 0.2)
-                src = "synthetic"
+        if not is_real_active and active_connections and cached_csv_df is not None and len(cached_csv_df) > 0:
+            idx = current_playback_index % len(cached_csv_df)
+            current_playback_index += 1
+            row = cached_csv_df.iloc[idx]
+            
+            ax = float(row.get("Acceleration_X", row.get("ax", 0.1)))
+            ay = float(row.get("Acceleration_Y", row.get("ay", 0.12)))
+            az = float(row.get("Acceleration_Z", row.get("az", 0.98)))
+            temp = float(row.get("Temperature_C", row.get("temperature_c", 32.0)))
+            pwm = float(row.get("Motor_PWM", row.get("pwm_duty", 80.0)))
+            if pwm > 100.0: pwm = round((pwm / 255.0) * 100.0, 1)
 
             payload = SensorIngestPayload(
                 motor_id="BO_MOTOR_01",
@@ -1416,14 +1534,19 @@ async def live_simulation_loop():
                 ax=round(ax, 4),
                 ay=round(ay, 4),
                 az=round(az, 4),
-                gyro_x=round(random.gauss(0, 0.01), 4),
-                gyro_y=round(random.gauss(0, 0.01), 4),
-                gyro_z=round(random.gauss(0, 0.01), 4),
+                gyro_x=0.0,
+                gyro_y=0.0,
+                gyro_z=0.0,
                 pwm_duty=round(pwm, 1),
-                source=src
+                source="real"
             )
 
             result = process_sensor_reading(payload)
+            result["playback"] = {
+                "current_row": idx + 1,
+                "total_rows": len(cached_csv_df),
+                "filename": current_csv_filename
+            }
             await broadcast_ws({"type": "live_reading", "data": result})
 
 @app.on_event("startup")
